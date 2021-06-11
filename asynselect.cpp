@@ -33,6 +33,7 @@ enum class SEventType
     ET_WRITE_READY,
     ET_DATA,
     ET_ACCETP,
+    ET_LISTEN,
 };
 
 class SockHandler;
@@ -88,6 +89,62 @@ public:
     {
         u_long type = 1;
         ioctlsocket(mSocket, FIONBIO, &type);
+    }
+    void SetREUSEADDR()
+    {
+        int optval = 1;
+        setsockopt(mSocket, SOL_SOCKET, SO_REUSEADDR, (const char*)&optval, sizeof(optval));
+    }
+
+    void ListenV4(std::string ip,int port,int backlog)
+    {
+        struct addrinfo hints, *ai = NULL;
+        int err, optval;
+        char buf[64];
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_flags = AI_PASSIVE;
+        sprintf(buf, "%d", port);
+        err = getaddrinfo(ip.c_str(), buf, &hints, &ai);
+        if(err)
+        {
+            goto __fail;
+        }
+
+        this->SetREUSEADDR();
+        err = bind(mSocket, ai->ai_addr, ai->ai_addrlen);
+        if(err)
+        {
+            goto __fail;
+        }
+
+        err = listen(mSocket, backlog);
+        if(err){
+            goto __fail;
+        }
+
+        this->mState = SockState::SS_LISTENING;
+        auto it = mListener.find(SEventType::ET_LISTEN);
+        if(it != mListener.end())
+        {
+            SEventArgs args(SEventType::ET_LISTEN,0);
+            it->second(this,args);
+        } 
+        freeaddrinfo(ai);
+        return;
+    __fail:
+        {
+            auto it = mListener.find(SEventType::ET_LISTEN);
+            if(it != mListener.end())
+            {
+                SEventArgs args(SEventType::ET_LISTEN,1);
+                it->second(this,args);
+            }        
+            Close();
+
+            if(ai)freeaddrinfo(ai);
+        }
     }
 
     int Connect(std::string ip, int port,
@@ -415,6 +472,14 @@ public:
             mConnects.push_back(ptr);
         }
         return ptr;
+    }
+
+    SockHandler*Listen(std::string ip,int port)
+    {
+        SockHandler *handler = new SockHandler();
+        //handler->Listen();
+        handler->On(SEventType::ET_ACCETP,[](auto*handler,SEventArgs arg)
+        {});
     }
 
 private:
