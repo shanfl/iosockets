@@ -107,44 +107,28 @@ public:
         hints.ai_flags = AI_PASSIVE;
         sprintf(buf, "%d", port);
         err = getaddrinfo(ip.c_str(), buf, &hints, &ai);
-        if(err)
-        {
-            goto __fail;
+        this->SetREUSEADDR();        
+        err = (err==0)?err:bind(mSocket, ai->ai_addr, ai->ai_addrlen);
+        err = (err==0)?err:listen(mSocket, backlog);
+
+        if(err == 0){
+            this->mState = SockState::SS_LISTENING;
         }
 
-        this->SetREUSEADDR();
-        err = bind(mSocket, ai->ai_addr, ai->ai_addrlen);
-        if(err)
-        {
-            goto __fail;
-        }
-
-        err = listen(mSocket, backlog);
-        if(err){
-            goto __fail;
-        }
-
-        this->mState = SockState::SS_LISTENING;
         auto it = mListener.find(SEventType::ET_LISTEN);
         if(it != mListener.end())
         {
-            SEventArgs args(SEventType::ET_LISTEN,0);
+            SEventArgs args(SEventType::ET_LISTEN,err);
             it->second(this,args);
         } 
-        freeaddrinfo(ai);
-        return;
-    __fail:
-        {
-            auto it = mListener.find(SEventType::ET_LISTEN);
-            if(it != mListener.end())
-            {
-                SEventArgs args(SEventType::ET_LISTEN,1);
-                it->second(this,args);
-            }        
-            Close();
 
-            if(ai)freeaddrinfo(ai);
-        }
+        if(err != 0)
+        {
+            Close();
+        }     
+
+        if(ai)freeaddrinfo(ai);
+        return;
     }
 
     int Connect(std::string ip, int port,
