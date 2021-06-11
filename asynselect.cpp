@@ -60,8 +60,8 @@ public:
     uint64_t mId = 0;
     SOCKET mSocket = 0;
     SockState mState = SockState::SS_CLOSED;
-    std::vector<char> mInBuf;
-    //std::vector<char> mOutBuf;
+    //std::vector<char> mInBuf;
+    std::vector<char> mOutBuf;
 
 public:
     std::map<SEventType, ListenFnType> mListener;
@@ -116,7 +116,7 @@ public:
             mSocket = INVALID_SOCKET;
         }
 
-        mInBuf.clear();
+        //mInBuf.clear();
         mOutBuf.clear();
         return 0;
     }
@@ -150,6 +150,7 @@ public:
     }
 
     void On(SEventType type, ListenFnType fn) { mListener[type] = fn; }
+    void ClearEvents(){ mListener.clear(); }
 
 public:
     void _on_connect_error()
