@@ -31,8 +31,11 @@ enum class SEventType
     ET_CONNECT,
     ET_ERROR,
     ET_WRITE_READY,
+    ET_DATA,
+    ET_ACCETP,
 };
 
+class SockHandler;
 struct SEventArgs
 {
     SEventArgs(SEventType t, int ec) : etype(t), code(ec)
@@ -45,6 +48,7 @@ struct SEventArgs
     int code;
     char *buff;
     size_t size;
+    SockHandler*accepted_handler = nullptr;
 };
 
 class SockHandler
@@ -67,6 +71,11 @@ public:
     {
         mSocket = socket(AF_INET, SOCK_STREAM, 0);
         this->SetNoBlock();
+    }
+
+    SockHandler(SOCKET socket) : mSocket(socket)
+    {
+
     }
 
     void SetNoDelay(int opt)
@@ -109,7 +118,31 @@ public:
 
         mInBuf.clear();
         mOutBuf.clear();
+        return 0;
     }
+
+    SockHandler*Accept()
+    {
+        SOCKET sockfd = accept(mSocket, NULL, NULL);
+        if(sockfd == INVALID_SOCKET){
+            return nullptr;
+        }
+
+        SockHandler*handler = new SockHandler(sockfd);
+        handler->mState = SockState::SS_CONNECTED;
+
+        //
+        auto it = mListener.find(SEventType::ET_ACCETP);
+        if(it != mListener.end())
+        {
+            SEventArgs args(SEventType::ET_ACCETP,0);
+            args.accepted_handler = handler;
+            mListener[SEventType::ET_ACCETP](this,args);
+        }
+        return handler;
+    }
+
+
 
     void On(SEventType type, ListenFnType fn) { mListener[type] = fn; }
 
@@ -131,6 +164,38 @@ public:
         if (it != mListener.end())
             it->second(this, args);
     }
+
+    void _recv() 
+    {
+        for(;;)
+        {
+            char data[8192];
+            int size = recv(this->mSocket, data, sizeof(data) - 1, 0);
+            if(size <= 0)
+            {
+                if(size == 0 || errno != EWOULDBLOCK)
+                {
+                    Close();
+                }
+                else
+                {
+                    return;
+                }
+            }
+
+            data[size] = 0;
+
+            auto it = mListener.find(SEventType::ET_DATA);
+            if(it != mListener.end())
+            {
+                SEventArgs args(SEventType::ET_DATA,0);
+                args.buff = data;
+                args.size = size;
+                it->second(this,args);
+            }
+        }
+    }
+
 
     int _try_write()
     {
@@ -229,7 +294,9 @@ public:
         struct timeval tv;
         tv.tv_sec = 0;
         tv.tv_usec = 1000;
+
         mSelectSet.zero();
+        
         for (auto *handler : mConnects)
         {
             switch (handler->mState)
@@ -243,11 +310,21 @@ public:
             break;
             case SockState::SS_CONNECTED:
             {
-                
+                mSelectSet.add(handler, SelectSetType::SST_READ);
+                if(handler->mOutBuf.size() > 0)
+                {
+                     mSelectSet.add(handler, SelectSetType::SST_WRITE);
+                }
             }
             break;
             case SockState::SS_CLOSING:
             {
+                mSelectSet.add(handler, SelectSetType::SST_WRITE);
+            }
+            break;
+            case SockState::SS_LISTENING:
+            {
+                mSelectSet.add(handler, SelectSetType::SST_READ);
             }
             break;
             case SockState::SS_CLOSED:
@@ -264,30 +341,53 @@ public:
         {
             switch (handler->mState)
             {
-            case SockState::SS_CONNECTING:
-            {
-                if (mSelectSet.ishas(handler, SelectSetType::SST_WRITE))
+                case SockState::SS_CONNECTING:
                 {
-                    handler->mState = SockState::SS_CONNECTED;
-                    int optval = 0;
-                    socklen_t optlen = sizeof(optval);
-                    getsockopt(handler->mSocket, SOL_SOCKET, SO_ERROR, (char *)&optval,
-                               &optlen);
-                    if (optval != 0)
+                    if (mSelectSet.ishas(handler, SelectSetType::SST_WRITE))
                     {
-                        // connect failed
+                        handler->mState = SockState::SS_CONNECTED;
+                        int optval = 0;
+                        socklen_t optlen = sizeof(optval);
+                        getsockopt(handler->mSocket, SOL_SOCKET, SO_ERROR, (char *)&optval,
+                                &optlen);
+                        if (optval != 0)
+                        {
+                            // connect failed
+                            handler->_on_connect_error();
+                        }
+                        else
+                        {
+                            handler->_on_connected();
+                        }
+                    }
+                    else if (mSelectSet.ishas(handler, SelectSetType::SST_EXCEP))
+                    {
                         handler->_on_connect_error();
                     }
-                    else
+                }
+                break;
+                case SockState::SS_CONNECTED:
+                {
+                    if(mSelectSet.ishas(handler,SelectSetType::SST_READ))
                     {
-                        handler->_on_connected();
+                        handler->_recv();
+                    }
+
+                    if(mSelectSet.ishas(handler,SelectSetType::SST_WRITE))
+                    {
+                        handler->_try_write();
                     }
                 }
-                else if (mSelectSet.ishas(handler, SelectSetType::SST_EXCEP))
+                break;
+                case SockState::SS_LISTENING:
                 {
-                    handler->_on_connect_error();
+                    // 
+                    if(mSelectSet.ishas(handler,SelectSetType::SST_READ))
+                    {
+                        this->Accept(handler);
+                    }
                 }
-            }
+                break;
             }
             // send data which is getted during from this loop
             handler->_try_write();
@@ -302,6 +402,16 @@ public:
         return handler->Connect(ip, port, listener);
     }
 
+    SockHandler* Accept(SockHandler*handlerListner)
+    {
+        auto ptr = handlerListner->Accept();
+        if(ptr){
+            mConnects.push_back(ptr);
+        }
+        return ptr;
+    }
+
+private:
     std::vector<SockHandler *> mConnects;
     SelectSet mSelectSet;
 };
