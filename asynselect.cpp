@@ -462,8 +462,24 @@ public:
     {
         SockHandler *handler = new SockHandler();
         //handler->Listen();
+        handler->On(SEventType::ET_LISTEN,[](auto*handler,SEventArgs arg){
+            if(arg.code == 0)
+            {
+                std::cout<<" listen start... " << std::endl;
+            }
+            else
+            {
+                // error
+                std::cout<<" listen error" << std::endl;
+            }
+        });
         handler->On(SEventType::ET_ACCETP,[](auto*handler,SEventArgs arg)
-        {});
+        {
+            std::cout<<" onaccept arg.code = " << arg.code  << " accept-handler: " << arg.accepted_handler << std:: endl;
+        });
+        mConnects.push_back(handler);
+        handler->ListenV4(ip,port,10);
+        return handler;
     }
 
 private:
@@ -477,12 +493,18 @@ int main()
     loop.Init();
     loop.Connect("127.0.0.1", 8080, [](auto *hanlder, SEventArgs args) -> void
                  {
-                     std::cout << "hander->state:" << (int)hanlder->mState
+                     std::cout << "connect hander->state:" << (int)hanlder->mState
                                << ",args.code:" << args.code;
                      if (args.code > 0) // Á´½ÓÊ§°Ü
                      {
                      }
                  });
+    auto* handler = loop.Listen("0.0.0.0",8000);
+
+    handler->On(SEventType::ET_ACCETP,[](auto*handler,SEventArgs arg)
+        {
+            std::cout<<" onaccept arg.code = " << arg.code  << " accept-handler: " << arg.accepted_handler << std:: endl;
+        });
 
     while (1)
     {
