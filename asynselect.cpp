@@ -61,7 +61,7 @@ public:
     SOCKET mSocket = 0;
     SockState mState = SockState::SS_CLOSED;
     std::vector<char> mInBuf;
-    std::vector<char> mOutBuf;
+    //std::vector<char> mOutBuf;
 
 public:
     std::map<SEventType, ListenFnType> mListener;
@@ -142,7 +142,12 @@ public:
         return handler;
     }
 
-
+    void Send(char*buff,size_t sz)
+    {
+        if(sz == 0)
+            return ;
+        mOutBuf.insert(mOutBuf.end(),buff,buff+sz-1);
+    }
 
     void On(SEventType type, ListenFnType fn) { mListener[type] = fn; }
 
