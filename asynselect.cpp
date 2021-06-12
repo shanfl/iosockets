@@ -6,15 +6,89 @@
 #include <WS2tcpip.h>
 #include <WinSock2.h>
 #include <windows.h>
-
+#include <inttypes.h>
 //#define errno WSAGetLastError()
 #define close closesocket
+
+
+#undef  EWOULDBLOCK
+#define EWOULDBLOCK WSAEWOULDBLOCK
+
+static int gettimeofday(struct timeval* tp, struct timezone* tzp)
+{
+    // Note: some broken versions only have 8 trailing zero's, the correct epoch has 9 trailing zero's
+    // This magic number is the number of 100 nanosecond intervals since January 1, 1601 (UTC)
+    // until 00:00:00 January 1, 1970 
+    static const uint64_t EPOCH = ((uint64_t)116444736000000000ULL);
+
+    SYSTEMTIME  system_time;
+    FILETIME    file_time;
+    uint64_t    time;
+
+    GetSystemTime(&system_time);
+    SystemTimeToFileTime(&system_time, &file_time);
+    time = ((uint64_t)file_time.dwLowDateTime);
+    time += ((uint64_t)file_time.dwHighDateTime) << 32;
+
+    tp->tv_sec = (long)((time - EPOCH) / 10000000L);
+    tp->tv_usec = (long)(system_time.wMilliseconds * 1000);
+    return 0;
+}
 #endif
 
 #include <functional>
 #include <iostream>
 #include <map>
 #include <vector>
+#include <queue>
+
+static int last_errno()
+{
+#if defined(_WIN32)
+    return GetLastError();
+#elif defined(__linux__)
+    return errno;
+#endif
+}
+
+using TimeProcessorFn = std::function<void(int, int, int)>;
+struct STimer
+{
+    int64_t id = 0;
+    uint64_t trigger_time  = 0 ; // million sec
+    int delay = 0;
+    int interval  = 0;
+
+    TimeProcessorFn processer;
+
+    bool operator < (const STimer& a) const
+    {
+        return this->trigger_time > a.trigger_time;
+    }
+};
+
+class STimerQueue : public std::priority_queue<STimer>
+{
+public:
+    bool remove(int id) {
+        auto it = std::find_if(this->c.begin(), this->c.end(), [id](auto& item) {return item.id == id; });
+        if (it != this->c.end()) {
+            this->c.erase(it);
+            std::make_heap(this->c.begin(), this->c.end(), this->comp);
+            return true;
+        }
+        else {
+            return false;
+        }
+    }
+
+    bool exist(int id)
+    {
+        auto it = std::find_if(this->c.begin(), this->c.end(), [id](auto& item) {return item.id == id; });
+        return it != this->c.end();
+    }
+};
+
 
 enum class SockState
 {
@@ -108,8 +182,8 @@ public:
         sprintf(buf, "%d", port);
         err = getaddrinfo(ip.c_str(), buf, &hints, &ai);
         this->SetREUSEADDR();        
-        err = (err==0)?err:bind(mSocket, ai->ai_addr, ai->ai_addrlen);
-        err = (err==0)?err:listen(mSocket, backlog);
+        err = (err!=0)?err:bind(mSocket, ai->ai_addr, ai->ai_addrlen);
+        err = (err!=0)?err:listen(mSocket, backlog);
 
         if(err == 0){
             this->mState = SockState::SS_LISTENING;
@@ -151,6 +225,11 @@ public:
 
         mState = SockState::SS_CLOSED;
 
+        SEventArgs args(SEventType::ET_CLOSE, 0);
+        auto it = mListener.find(SEventType::ET_CLOSE);
+        if (it != mListener.end())
+            it->second(this, args);
+
         if (mSocket != INVALID_SOCKET)
         {
             close(mSocket);
@@ -187,7 +266,7 @@ public:
     {
         if(sz == 0)
             return ;
-        mOutBuf.insert(mOutBuf.end(),buff,buff+sz-1);
+        mOutBuf.insert(mOutBuf.end(),buff,buff+sz);
     }
 
     void On(SEventType type, ListenFnType fn) { mListener[type] = fn; }
@@ -219,10 +298,11 @@ public:
             char data[8192];
             int size = recv(this->mSocket, data, sizeof(data) - 1, 0);
             if(size <= 0)
-            {
-                if(size == 0 || errno != EWOULDBLOCK)
+            {            
+                if(size == 0 || last_errno() != EWOULDBLOCK)
                 {
                     Close();
+                    return;
                 }
                 else
                 {
@@ -338,9 +418,9 @@ public:
 
         // clear closed socket
         //
+        // handle timer
         struct timeval tv;
-        tv.tv_sec = 0;
-        tv.tv_usec = 1000;
+        this->pre_process_timer(tv);
 
         mSelectSet.zero();
         
@@ -439,6 +519,8 @@ public:
             // send data which is getted during from this loop
             handler->_try_write();
         }
+
+        this->process_timer();
     }
 
     int Connect(std::string ip, int port,
@@ -482,9 +564,100 @@ public:
         return handler;
     }
 
+    void pre_process_timer(struct timeval& tv)
+    {
+        uint64_t now = GetNowTime();
+        int64_t waitingInterval = 0;
+        if (mTimerQueue.size())
+        {
+            waitingInterval = mTimerQueue.top().trigger_time - now;
+            if (waitingInterval <= 0)
+            {
+                waitingInterval = 0;
+            }
+            else
+            {
+                if (waitingInterval > 1000)
+                    waitingInterval = 1000;
+            }
+
+            tv.tv_sec = waitingInterval / 1000;
+            tv.tv_usec = waitingInterval % 1000 * 1000;
+        }
+        else
+        {
+            tv.tv_sec = 0;
+            tv.tv_usec = 1000;  // 1 millsec
+        }
+    }
+    void process_timer()
+    {
+        // handler timer
+        uint64_t now = GetNowTime();
+        while (mTimerQueue.size())
+        {
+            if (mTimerQueue.top().trigger_time <= now)
+            {
+                mQueueToConsume.push_back(mTimerQueue.top());
+                mTimerQueue.pop();
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        for (auto& timer : mQueueToConsume)
+        {
+            if (timer.processer)
+                timer.processer(timer.id, timer.delay, timer.interval);
+
+            if (timer.interval > 0)
+            {
+                bool suc = this->AddTimer(timer.id, timer.interval, timer.interval, timer.processer);
+                if (!suc)
+                {
+                    // 
+                    std::cout << "add timer " << timer.id << " error occour" << std::endl;
+                }
+            }
+        }
+        mQueueToConsume.clear();
+    }
+
+public:
+    static uint64_t GetNowTime()
+    {
+        struct timeval tv;
+        gettimeofday(&tv, nullptr);
+        //seconds = tv.tv_sec;
+        //milliseconds = tv.tv_usec / 1000;
+        return tv.tv_sec * 1000 + tv.tv_usec / 1000;
+    }
+    // timer event
+    bool AddTimer(int id, int delay, int interval = 0,TimeProcessorFn fn = nullptr)
+    {
+        if (mTimerQueue.exist(id))
+            return false;
+        STimer t;
+        t.id = id;
+        t.delay = delay;
+        t.interval = interval;
+        t.processer = fn;
+        t.trigger_time = SelectLoop::GetNowTime() + delay;
+        mTimerQueue.emplace(t);
+        return true;
+    }
+    bool DelTimer(int id)
+    {
+        return mTimerQueue.remove(id);
+    }
+
 private:
     std::vector<SockHandler *> mConnects;
     SelectSet mSelectSet;
+    STimerQueue mTimerQueue;
+    std::vector<STimer> mQueueToConsume;
 };
 
 int main()
@@ -500,12 +673,29 @@ int main()
                      }
                  });
     auto* handler = loop.Listen("0.0.0.0",8000);
+    handler->SetNoDelay(1);
 
     handler->On(SEventType::ET_ACCETP,[](auto*handler,SEventArgs arg)
         {
             std::cout<<" onaccept arg.code = " << arg.code  << " accept-handler: " << arg.accepted_handler << std:: endl;
+
+            auto* clientHandler = arg.accepted_handler;
+            clientHandler->On(SEventType::ET_DATA,[](auto*handler, auto arg) {
+                std::cout << "recv:" << arg.buff << std::endl;
+                handler->Send(arg.buff, arg.size);
+            });
+            clientHandler->On(SEventType::ET_CLOSE, [](auto* handler, auto arg) {
+                std::cout << " socket closed" << std::endl;
+            });
+
         });
 
+    loop.AddTimer(1, 0, 0, [](int id,int delay,int interval) {
+        std::cout << "timeid:" << id << " interval:" << interval << " nowtime:" << SelectLoop::GetNowTime() << std::endl;
+        });
+    loop.AddTimer(2, 10000, 0, [](int id, int delay, int interval) {
+        std::cout << "timeid:" << id << " interval:" << interval << " nowtime:" << SelectLoop::GetNowTime() << std::endl;
+        });
     while (1)
     {
         loop.update();
