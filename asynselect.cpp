@@ -411,12 +411,43 @@ public:
 #endif
     }
 
-    void UnInit() {}
+    void UnInit()
+    {
+#ifdef __WIN32
+        WSACleanup();
+#else 
+#endif
+    }
 
-    void update()
+    void Stop()
+    {
+        SetStop(1);
+    }
+
+    void Shutdown()
+    {
+        while (mTimerQueue.size())
+            mTimerQueue.pop();
+
+        for (auto con : mConnects)
+        {
+            con->Close();
+        }
+        this->Update();
+    }
+    void Update()
     {
 
         // clear closed socket
+        for (int i = mConnects.size() - 1; i >= 0; i--)
+        {
+            if (mConnects[i]->mState == SockState::SS_CLOSED)
+            {
+                delete* (mConnects.begin() + i);
+                mConnects.erase(mConnects.begin() + i);
+            }                
+        }
+
         //
         // handle timer
         struct timeval tv;
@@ -424,7 +455,8 @@ public:
 
         mSelectSet.zero();
         
-        for (auto *handler : mConnects)
+        auto connect_conatiner = mConnects;
+        for (auto *handler : connect_conatiner)
         {
             switch (handler->mState)
             {
@@ -464,7 +496,7 @@ public:
         select(mSelectSet.maxfd + 1, &mSelectSet.fds[0], &mSelectSet.fds[1],
                &mSelectSet.fds[2], &tv);
 
-        for (auto *handler : mConnects)
+        for (auto *handler : connect_conatiner)
         {
             switch (handler->mState)
             {
@@ -652,12 +684,14 @@ public:
     {
         return mTimerQueue.remove(id);
     }
-
+    bool IsStop() { return mStopFlag == 1;}
+    void SetStop(int flag) { mStopFlag = flag; }
 private:
     std::vector<SockHandler *> mConnects;
     SelectSet mSelectSet;
     STimerQueue mTimerQueue;
     std::vector<STimer> mQueueToConsume;
+    int mStopFlag = 0;
 };
 
 int main()
@@ -667,7 +701,7 @@ int main()
     loop.Connect("127.0.0.1", 8080, [](auto *hanlder, SEventArgs args) -> void
                  {
                      std::cout << "connect hander->state:" << (int)hanlder->mState
-                               << ",args.code:" << args.code;
+                               << ",args.code:" << args.code << std::endl;
                      if (args.code > 0) // ¡¥Ω” ß∞‹
                      {
                      }
@@ -693,13 +727,16 @@ int main()
     loop.AddTimer(1, 0, 0, [](int id,int delay,int interval) {
         std::cout << "timeid:" << id << " interval:" << interval << " nowtime:" << SelectLoop::GetNowTime() << std::endl;
         });
-    loop.AddTimer(2, 10000, 0, [](int id, int delay, int interval) {
+    loop.AddTimer(2, 10000, 0, [&loop](int id, int delay, int interval) {
         std::cout << "timeid:" << id << " interval:" << interval << " nowtime:" << SelectLoop::GetNowTime() << std::endl;
+        loop.Stop();
         });
-    while (1)
+    while (!loop.IsStop())
     {
-        loop.update();
+        loop.Update();
     }
+    loop.Shutdown();
+    loop.UnInit();
 
     return 0;
 }
