@@ -275,7 +275,7 @@ public:
 public:
     void _on_connect_error()
     {
-        mState = SockState::SS_CLOSED;
+        Close();
         SEventArgs args(SEventType::ET_CONNECT, 1);
         auto it = mListener.find(SEventType::ET_CONNECT);
         if (it != mListener.end())
